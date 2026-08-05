@@ -8,7 +8,8 @@ function createEntry(file) {
     file,
     status: 'uploading',
     serverName: null,
-    error: ''
+    error: '',
+    progress: 0
   };
 }
 
@@ -71,33 +72,7 @@ function App() {
     setStatusMessage('Загружаем файлы на сервер...');
 
     for (const entry of pendingEntries) {
-      const formData = new FormData();
-      formData.append('files', entry.file);
-
-      try {
-        const response = await fetch(`${API_BASE}/files`, {
-          method: 'POST',
-          body: formData
-        });
-
-        const data = await response.json().catch(() => ({}));
-
-        if (!response.ok) {
-          throw new Error(data?.error || 'Не удалось загрузить файл');
-        }
-
-        const serverName = data.saved?.[0] || entry.file.name;
-
-        setFiles((prev) =>
-          prev.map((item) => (item.id === entry.id ? { ...item, status: 'uploaded', serverName } : item))
-        );
-      } catch (error) {
-        setFiles((prev) =>
-          prev.map((item) =>
-            item.id === entry.id ? { ...item, status: 'error', error: error.message } : item
-          )
-        );
-      }
+      await uploadSingleFile(entry);
     }
 
     setIsUploading(false);
@@ -121,6 +96,80 @@ function App() {
         method: 'DELETE'
       }).catch(() => {});
     }
+  };
+
+  const uploadSingleFile = async (entry) => {
+    setFiles((prev) =>
+      prev.map((item) =>
+        item.id === entry.id ? { ...item, status: 'uploading', error: '', progress: 0 } : item
+      )
+    );
+
+    return new Promise((resolve) => {
+      const xhr = new XMLHttpRequest();
+      const formData = new FormData();
+      formData.append('files', entry.file);
+
+      xhr.open('POST', `${API_BASE}/files`);
+      xhr.responseType = 'text';
+
+      xhr.upload.onprogress = (event) => {
+        if (!event.lengthComputable) return;
+        const percent = Math.round((event.loaded / event.total) * 100);
+        setFiles((prev) =>
+          prev.map((item) => (item.id === entry.id ? { ...item, progress: percent } : item))
+        );
+      };
+
+      xhr.onload = () => {
+        let data = {};
+        try {
+          data = JSON.parse(xhr.responseText);
+        } catch (err) {
+          data = {};
+        }
+
+        if (xhr.status >= 200 && xhr.status < 300) {
+          const serverName = data.saved?.[0] || entry.file.name;
+          setFiles((prev) =>
+            prev.map((item) =>
+              item.id === entry.id
+                ? { ...item, status: 'uploaded', serverName, progress: 100, error: '' }
+                : item
+            )
+          );
+        } else {
+          const errorMessage = data?.error || `Не удалось загрузить файл (${xhr.status})`;
+          setFiles((prev) =>
+            prev.map((item) =>
+              item.id === entry.id
+                ? { ...item, status: 'error', error: errorMessage, progress: 0 }
+                : item
+            )
+          );
+        }
+        resolve();
+      };
+
+      xhr.onerror = () => {
+        setFiles((prev) =>
+          prev.map((item) =>
+            item.id === entry.id
+              ? { ...item, status: 'error', error: 'Сетевая ошибка при загрузке файла', progress: 0 }
+              : item
+          )
+        );
+        resolve();
+      };
+
+      xhr.send(formData);
+    });
+  };
+
+  const handleRetryUpload = async (item) => {
+    setIsUploading(true);
+    await uploadSingleFile(item);
+    setIsUploading(false);
   };
 
   const handleGenerate = async () => {
@@ -263,15 +312,33 @@ function App() {
               <li key={item.id} className={`file-item ${item.status}`}>
                 <div>
                   <span>{item.file.name}</span>
-                  <small>
-                    {item.status === 'uploading' && 'загружается'}
-                    {item.status === 'uploaded' && 'загружено'}
-                    {item.status === 'error' && item.error}
+                  <small style={{marginLeft: 5}}>
+                    <span style={{color:"blue"}}>
+                    	{item.status === 'uploading' && (
+	                      item.progress > 0 ? `загружается — ${item.progress}%` : 'загружается...'
+	                    )}
+                    </span>
+                    <span style={{color:"green"}}>{item.status === 'uploaded' && 'загружено'}</span>
+                    <span style={{color:"red"}}>{item.status === 'error' && item.error}</span>
                   </small>
                 </div>
-                <button type="button" onClick={() => handleRemoveFile(item.id)}>
-                  Удалить
-                </button>
+                <div className="file-actions">
+                  {item.status === 'error' && (
+                    <button
+                      type="button"
+                      title="Повторить"
+                      className="retry-button"
+                      onClick={() => handleRetryUpload(item)}
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M12 5V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.07-.28 2.08-.78 2.96l1.46 1.46C19.74 14.32 20 13.19 20 12c0-4.42-3.58-8-8-8zm-6.34 2.46L4.22 6.32C3.58 7.68 3.2 9.3 3.2 11c0 4.42 3.58 8 8 8v4l4-4-4-4v3c-3.31 0-6-2.69-6-6 0-1.07.28-2.08.78-2.96z" fill="currentColor" />
+                      </svg>
+                    </button>
+                  )}
+                  <button type="button" onClick={() => handleRemoveFile(item.id)}>
+                    Удалить
+                  </button>
+                </div>
               </li>
             ))}
           </ul>
