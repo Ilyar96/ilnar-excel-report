@@ -424,10 +424,20 @@ function processFile(filePath) {
             "сумма материала и услуги (руб)",
             "сумма материала и услуги(руб)"
         ]);
-
         if (objectColumn === -1 || dateColumn === -1 || amountColumn === -1) {
-        const message = `Пропускаю таблицу, начиная с строки ${headerRow + 1}: не найдены обязательные колонки.`;
-        logger.warn(message, { action: "processFile", filePath, headerRow: headerRow + 1 });
+            const message = `Пропускаю таблицу, начиная с строки ${headerRow + 1}: не найдены обязательные колонки.`;
+            logger.warn(message, { action: "processFile", filePath, headerRow: headerRow + 1 });
+            continue;
+        }
+
+        // Переменные для запоминания текущего кода и месяца по мере обхода строк
+        let currentCode = null;
+        let currentMonth = null;
+
+        // Обход строк таблицы между заголовками
+        for (let i = headerRow + 1; i < nextHeaderRow; i++) {
+            const row = rows[i];
+
             if (!row || row.every(cell => String(cell ?? "").trim() === "")) {
                 continue;
             }
@@ -458,14 +468,22 @@ function processFile(filePath) {
             const month = rowMonth || currentMonth || "";
             const amount = toNumber(row[amountColumn]);
 
-        logger.debug("Обнаружена строка данных.", {
-            action: "processFile",
-            filePath,
-            code,
-            month,
-            amount,
-            rowIndex: i + 1
-        });
+            logger.debug("Обнаружена строка данных.", {
+                action: "processFile",
+                filePath,
+                code,
+                month,
+                amount,
+                rowIndex: i + 1
+            });
+
+            if (!fileMap.has(code)) {
+                fileMap.set(code, {
+                    code,
+                    month: month || "",
+                    total: 0
+                });
+            }
 
             const bucket = fileMap.get(code);
 
