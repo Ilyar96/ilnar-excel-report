@@ -17,6 +17,7 @@ function App() {
   const [resultName, setResultName] = useState('');
   const [titleFontSize, setTitleFontSize] = useState('11');
   const [cellFontSize, setCellFontSize] = useState('11');
+  const [useExpensePeriod, setUseExpensePeriod] = useState(false);
   const [expensePeriod, setExpensePeriod] = useState(String(new Date().getMonth() + 1));
   const [statusMessage, setStatusMessage] = useState('Выберите Excel-файлы и загрузите их на сервер.');
   const [isUploading, setIsUploading] = useState(false);
@@ -133,7 +134,7 @@ function App() {
     setIsGenerating(true);
     setStatusMessage('Генерируем акруал...');
 
-    const periodValue = expensePeriod.trim();
+    const periodValue = useExpensePeriod ? expensePeriod.trim() : '';
     const periodNumber = periodValue === '' ? undefined : Number(periodValue);
 
     if (periodValue !== '' && (!Number.isInteger(periodNumber) || periodNumber < 1 || periodNumber > 12)) {
@@ -147,7 +148,7 @@ function App() {
       resultName: resultName.trim() || defaultResultName,
       titleFontSize: Number(titleFontSize) || 11,
       cellFontSize: Number(cellFontSize) || 11,
-      period: periodNumber
+      period: useExpensePeriod && periodValue !== '' ? periodNumber : undefined
     };
 
     try {
@@ -222,16 +223,25 @@ function App() {
             />
           </label>
 
-          <label>
-            <span>Период расхода</span>
+          <div>
+						<label className="checkbox-label">
+							<input
+								className="checkbox-input"
+								type="checkbox"
+								checked={useExpensePeriod}
+								onChange={() => setUseExpensePeriod((current) => !current)}
+							/>
+							<span>Период расхода</span>
+						</label>
             <input
               type="number"
               min="1"
               max="12"
               value={expensePeriod}
               onChange={(event) => setExpensePeriod(event.target.value)}
+              disabled={!useExpensePeriod}
             />
-          </label>
+          </div>
         </div>
 
         <label className="file-picker">

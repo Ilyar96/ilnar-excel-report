@@ -4,6 +4,7 @@ const XLSX = require("xlsx-js-style");
 const express = require("express");
 const multer = require("multer");
 const cors = require("cors");
+const logger = require("./logger");
 
 const INPUT_DIR = path.join(__dirname, "input");
 const OUTPUT_DIR = path.join(__dirname, "output");
@@ -25,12 +26,17 @@ const RESULT_COLUMNS = {
  */
 function readInputFiles() {
     if (!fs.existsSync(INPUT_DIR)) {
-        throw new Error("Папка input не найдена.");
+        const error = new Error("Папка input не найдена.");
+        logger.error(error.message, { action: "readInputFiles" });
+        throw error;
     }
 
-    return fs
+    const files = fs
         .readdirSync(INPUT_DIR)
         .filter(file => file.toLowerCase().endsWith(".xlsx"));
+
+    logger.info("Список входных файлов прочитан.", { action: "readInputFiles", fileCount: files.length });
+    return files;
 }
 
 /**
@@ -62,17 +68,24 @@ function normalizeAmount(value) {
     return Math.round(number * 100) / 100;
 }
 
-function getNumericFormat() {
+function getNumericFormat(value) {
+    if (!SHOULD_ROUND_NUMBERS && !SHOULD_FORMAT_NUMBERS) {
+        return null;
+    }
+
+    const integerFormat = "# ##0";
+    const decimalFormat = "# ##0.##";
+
     if (SHOULD_ROUND_NUMBERS && SHOULD_FORMAT_NUMBERS) {
-        return "# ##0.##";
+        return Number.isInteger(value) ? integerFormat : decimalFormat;
     }
 
     if (SHOULD_ROUND_NUMBERS) {
-        return "0.##";
+        return Number.isInteger(value) ? integerFormat : decimalFormat;
     }
 
     if (SHOULD_FORMAT_NUMBERS) {
-        return "# ##0.############";
+        return Number.isInteger(value) ? integerFormat : "# ##0.############";
     }
 
     return null;
@@ -172,7 +185,6 @@ function applySheetStyles(sheet, rowCount, columnCount, totalRowIndex) {
             }
 
             if (
-                numericFormat &&
                 rowIndex > 0 &&
                 [
                     RESULT_COLUMNS.articleName,
@@ -180,10 +192,17 @@ function applySheetStyles(sheet, rowCount, columnCount, totalRowIndex) {
                     RESULT_COLUMNS.amountWithVat
                 ].includes(columnIndex)
             ) {
-                style = {
-                    ...style,
-                    numFmt: numericFormat
-                };
+                const address = encodeCellAddress(rowIndex, columnIndex);
+                const cell = sheet[address];
+                const cellValue = cell && typeof cell.v === "number" ? cell.v : null;
+                const currentFormat = getNumericFormat(cellValue);
+
+                if (currentFormat) {
+                    style = {
+                        ...style,
+                        numFmt: currentFormat
+                    };
+                }
             }
 
             setCellStyle(sheet, rowIndex, columnIndex, style);
@@ -369,6 +388,8 @@ function getTotalAmount(rows, startRow, columns) {
  * Обработка одного файла
  */
 function processFile(filePath) {
+    logger.info("Начинаю обработку файла.", { action: "processFile", filePath });
+
     const workbook = XLSX.readFile(filePath, {
         cellFormula: true,
         cellDates: true
@@ -384,6 +405,7 @@ function processFile(filePath) {
     const headerRows = findHeaderRows(rows);
 
     if (headerRows.length === 0) {
+        logger.warn("Не найдены заголовки таблицы в файле.", { action: "processFile", filePath });
         return [];
     }
 
@@ -404,18 +426,8 @@ function processFile(filePath) {
         ]);
 
         if (objectColumn === -1 || dateColumn === -1 || amountColumn === -1) {
-            console.warn(
-                `Пропускаю таблицу, начиная с строки ${headerRow + 1}: не найдены обязательные колонки.`
-            );
-            continue;
-        }
-
-        let currentCode = null;
-        let currentMonth = "";
-
-        for (let i = headerRow + 1; i < nextHeaderRow; i++) {
-            const row = rows[i];
-
+        const message = `Пропускаю таблицу, начиная с строки ${headerRow + 1}: не найдены обязательные колонки.`;
+        logger.warn(message, { action: "processFile", filePath, headerRow: headerRow + 1 });
             if (!row || row.every(cell => String(cell ?? "").trim() === "")) {
                 continue;
             }
@@ -446,13 +458,14 @@ function processFile(filePath) {
             const month = rowMonth || currentMonth || "";
             const amount = toNumber(row[amountColumn]);
 
-            if (!fileMap.has(code)) {
-                fileMap.set(code, {
-                    code,
-                    month: month || "",
-                    total: 0
-                });
-            }
+        logger.debug("Обнаружена строка данных.", {
+            action: "processFile",
+            filePath,
+            code,
+            month,
+            amount,
+            rowIndex: i + 1
+        });
 
             const bucket = fileMap.get(code);
 
@@ -483,7 +496,20 @@ function buildResultRows(resultMap, period) {
     ];
     let totalWithVatSum = 0;
 
-    for (const item of resultMap.values()) {
+    const sortedItems = Array.from(resultMap.values()).sort((a, b) => {
+        const aNum = Number(String(a.code).trim());
+        const bNum = Number(String(b.code).trim());
+
+        if (!Number.isNaN(aNum) && !Number.isNaN(bNum)) {
+            return aNum - bNum;
+        }
+
+        if (a.code < b.code) return -1;
+        if (a.code > b.code) return 1;
+        return 0;
+    });
+
+    for (const item of sortedItems) {
         const totalWithVat = normalizeAmount(item.total);
 
         rows.push([
@@ -591,9 +617,10 @@ function deleteAllFilesInDir(dir) {
             if (fs.lstatSync(filePath).isFile()) {
                 fs.unlinkSync(filePath);
                 deleted.push(name);
+                logger.info("Файл удалён в рамках очистки.", { action: "deleteAllFilesInDir", filePath });
             }
         } catch (err) {
-            console.error(`Не удалось удалить файл ${filePath}:`, err);
+            logger.error(`Не удалось удалить файл ${filePath}.`, { action: "deleteAllFilesInDir", error: err.message });
         }
     }
     return deleted;
@@ -635,11 +662,18 @@ app.post("/files", upload.array("files"), (req, res) => {
     const saved = [];
     for (const f of req.files || []) {
         if (!f.originalname.toLowerCase().endsWith('.xlsx')) {
-            // remove invalid
             fs.unlinkSync(f.path);
+            logger.warn("Загружен некорректный файл и удалён.", {
+                action: "uploadFiles",
+                file: f.originalname
+            });
             continue;
         }
         saved.push(path.basename(f.originalname));
+        logger.info("Файл загружен.", {
+            action: "uploadFiles",
+            file: f.originalname
+        });
     }
 
     res.json({ saved });
@@ -648,15 +682,27 @@ app.post("/files", upload.array("files"), (req, res) => {
 app.delete("/files/:name", (req, res) => {
     const name = path.basename(req.params.name);
     if (!name.toLowerCase().endsWith('.xlsx')) {
+        logger.warn("Попытка удалить файл с неверным именем.", {
+            action: "deleteInputFile",
+            requestedName: req.params.name
+        });
         return res.status(400).send('Неверное имя файла');
     }
 
     const p = path.join(INPUT_DIR, name);
-    if (!fs.existsSync(p)) return res.status(404).send('Файл не найден');
+    if (!fs.existsSync(p)) {
+        logger.warn("Файл для удаления не найден.", {
+            action: "deleteInputFile",
+            file: name
+        });
+        return res.status(404).send('Файл не найден');
+    }
     try {
         fs.unlinkSync(p);
+        logger.info("Входной файл удалён.", { action: "deleteInputFile", file: name });
         res.sendStatus(204);
     } catch (err) {
+        logger.error("Ошибка удаления входного файла.", { action: "deleteInputFile", file: name, error: err.message });
         res.status(500).send(err.message);
     }
 });
@@ -722,30 +768,42 @@ let periodValue = undefined;
     });
 
         const filename = path.basename(outputPath);
+        logger.info("Результат сформирован.", { action: "generate", outputPath, filename, fileCount: toProcess.length });
 
         res.download(outputPath, filename, err => {
             if (err) {
-                console.error('Ошибка отправки файла:', err);
+                logger.error("Ошибка отправки файла.", { action: "generate", err: err.message });
                 return res.status(500).send(err.message);
             }
 
-            // on success remove input files used and delete generated output
+            logger.info("Результат отправлен клиенту.", { action: "generate", filename });
+
             for (const f of toProcess) {
                 try {
                     fs.unlinkSync(path.join(INPUT_DIR, f));
+                    logger.info("Входной файл удалён после генерации.", { action: "cleanupInput", file: f });
                 } catch (e) {
-                    // ignore
+                    logger.warn("Не удалось удалить входной файл после генерации.", {
+                        action: "cleanupInput",
+                        file: f,
+                        error: e.message
+                    });
                 }
             }
 
             try {
                 fs.unlinkSync(outputPath);
+                logger.info("Сгенерированный выходной файл удалён после отправки.", { action: "cleanupOutput", outputPath });
             } catch (e) {
-                console.error('Не удалось удалить сгенерированный файл после отправки:', e);
+                logger.warn("Не удалось удалить сгенерированный файл после отправки.", {
+                    action: "cleanupOutput",
+                    outputPath,
+                    error: e.message
+                });
             }
         });
     } catch (err) {
-        console.error(err);
+        logger.error("Ошибка при генерации отчёта.", { action: "generate", error: String(err.message || err) });
         res.status(500).send(String(err.message || err));
     }
 });
@@ -753,18 +811,27 @@ let periodValue = undefined;
 app.get('/result/:name', (req, res) => {
     const name = path.basename(req.params.name);
     const p = path.join(OUTPUT_DIR, name);
-    if (!fs.existsSync(p)) return res.status(404).send('Файл не найден');
+    if (!fs.existsSync(p)) {
+        logger.warn("Запрошенный результат не найден.", { action: "downloadResult", file: name });
+        return res.status(404).send('Файл не найден');
+    }
+    logger.info("Отдаю результат клиенту.", { action: "downloadResult", file: name });
     res.download(p, name);
 });
 
 app.delete('/result/:name', (req, res) => {
     const name = path.basename(req.params.name);
     const p = path.join(OUTPUT_DIR, name);
-    if (!fs.existsSync(p)) return res.status(404).send('Файл не найден');
+    if (!fs.existsSync(p)) {
+        logger.warn("Результат для удаления не найден.", { action: "deleteResult", file: name });
+        return res.status(404).send('Файл не найден');
+    }
     try {
         fs.unlinkSync(p);
+        logger.info("Результат удалён.", { action: "deleteResult", file: name });
         res.sendStatus(204);
     } catch (err) {
+        logger.error("Ошибка удаления результата.", { action: "deleteResult", file: name, error: err.message });
         res.status(500).send(err.message);
     }
 });
@@ -782,6 +849,7 @@ app.delete('/cleanup', (req, res) => {
 app.post('/result/cleanup', (req, res) => {
     const { name } = req.body || {};
     if (!name) {
+        logger.info("Запрос очистки результатов без указанного имени.", { action: "resultCleanup" });
         return res.sendStatus(204);
     }
 
@@ -791,15 +859,82 @@ app.post('/result/cleanup', (req, res) => {
     if (fs.existsSync(p)) {
         try {
             fs.unlinkSync(p);
+            logger.info("Результат удалён при очистке.", { action: "resultCleanup", file: safeName });
         } catch (err) {
-            console.error('Не удалось удалить результат при очистке:', err);
+            logger.error("Не удалось удалить результат при очистке.", { action: "resultCleanup", file: safeName, error: err.message });
         }
+    } else {
+        logger.warn("Результат для очистки не найден.", { action: "resultCleanup", file: safeName });
     }
 
     res.sendStatus(204);
 });
 
+async function cliGenerate(options = {}) {
+    try {
+        const all = readInputFiles();
+
+        if (!all || all.length === 0) {
+            console.log("Нет файлов в папке input для обработки.");
+            process.exit(0);
+        }
+
+        const resultMap = new Map();
+
+        for (const file of all) {
+            const filePath = path.join(INPUT_DIR, file);
+            const fileRows = processFile(filePath);
+
+            for (const result of fileRows) {
+                if (!resultMap.has(result.code)) {
+                    resultMap.set(result.code, {
+                        code: result.code,
+                        month: result.month,
+                        total: 0
+                    });
+                }
+
+                const bucket = resultMap.get(result.code);
+
+                if (!bucket.month && result.month) {
+                    bucket.month = result.month;
+                }
+
+                bucket.total += result.total;
+            }
+        }
+
+        const outputPath = writeResult(resultMap, {
+            resultName: options.resultName,
+            period: options.period
+        });
+
+        logger.info("CLI: результат сформирован.", { action: "cliGenerate", outputPath });
+        process.exit(0);
+    } catch (err) {
+        logger.error("CLI: ошибка генерации.", { action: "cliGenerate", error: String(err.message || err) });
+        process.exit(1);
+    }
+}
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Report generator server listening on http://localhost:${PORT}`);
-});
+
+if (process.argv.includes('--generate-all')) {
+    const opts = {};
+    for (const arg of process.argv.slice(2)) {
+        if (arg.startsWith('--resultName=')) {
+            opts.resultName = arg.split('=')[1];
+        }
+        if (arg.startsWith('--period=')) {
+            const v = Number(arg.split('=')[1]);
+            if (!Number.isNaN(v)) opts.period = v;
+        }
+    }
+
+    cliGenerate(opts);
+} else {
+    app.listen(PORT, () => {
+        logger.info(`Report generator server listening on http://localhost:${PORT}`,
+            { action: "serverStart", port: PORT });
+    });
+}

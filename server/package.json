@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "node report-generator.js"
+    "start": "node report-generator.js",
+    "generate:all": "node report-generator.js --generate-all"
   },
   "keywords": [],
   "author": "",
